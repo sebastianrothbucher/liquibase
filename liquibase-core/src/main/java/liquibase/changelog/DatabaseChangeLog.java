@@ -24,6 +24,7 @@ import liquibase.precondition.Conditional;
 import liquibase.precondition.core.PreconditionContainer;
 import liquibase.resource.ResourceAccessor;
 import liquibase.util.StreamUtil;
+import liquibase.util.StringUtils;
 import liquibase.util.file.FilenameUtils;
 
 import java.io.File;
@@ -32,6 +33,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -44,7 +46,8 @@ import java.util.TreeSet;
  */
 public class DatabaseChangeLog implements Comparable<DatabaseChangeLog>, Conditional {
     private static final ThreadLocal<DatabaseChangeLog> ROOT_CHANGE_LOG = new ThreadLocal<DatabaseChangeLog>();
-
+    private static final ThreadLocal<Set<String>> INCLUDED_FILES = new ThreadLocal<Set<String>>();
+    
     private PreconditionContainer preconditionContainer = new PreconditionContainer();
     private String physicalFilePath;
     private String logicalFilePath;
@@ -221,15 +224,45 @@ public class DatabaseChangeLog implements Comparable<DatabaseChangeLog>, Conditi
     }
 
     public void load(ParsedNode parsedNode, ResourceAccessor resourceAccessor) throws ParsedNodeException, SetupException {
-        setLogicalFilePath(parsedNode.getChildValue(null, "logicalFilePath", String.class));
-        String objectQuotingStrategy = parsedNode.getChildValue(null, "objectQuotingStrategy", String.class);
-        if (objectQuotingStrategy != null) {
-            setObjectQuotingStrategy(ObjectQuotingStrategy.valueOf(objectQuotingStrategy));
-        }
-        for (ParsedNode childNode : parsedNode.getChildren()) {
-            handleChildNode(childNode, resourceAccessor);
-        }
-    }
+    	// TODO: provide a switch for old behavior (= run until stack overflow), warn, error
+		final boolean freshRun;
+		final Set<String> includedFiles;
+		if (INCLUDED_FILES.get() == null) {
+			includedFiles = new HashSet<String>();
+			INCLUDED_FILES.set(includedFiles);
+			freshRun = true;
+		} else {
+			includedFiles = INCLUDED_FILES.get();
+			freshRun = false;
+		}
+		try {
+			setLogicalFilePath(parsedNode.getChildValue(null, "logicalFilePath", String.class));
+			// we need conversion 2 physical that comes w/ the getter
+			final String filePath = getLogicalFilePath();
+			final String depthPrefix = StringUtils.repeat("--", includedFiles.size());
+			if (includedFiles.contains(filePath)) {
+				// ignore file, previously loaded w/in this tree
+				System.out.println(depthPrefix + "skipping previously loaded file " + filePath);
+				return;
+			}
+			System.out.println(depthPrefix + "loading file " + filePath);
+			includedFiles.add(filePath);
+			String objectQuotingStrategy = parsedNode.getChildValue(null, "objectQuotingStrategy", String.class);
+			if (objectQuotingStrategy != null) {
+				setObjectQuotingStrategy(ObjectQuotingStrategy.valueOf(objectQuotingStrategy));
+			}
+			for (ParsedNode childNode : parsedNode.getChildren()) {
+				handleChildNode(childNode, resourceAccessor);
+			}
+			// including twice in a sequence would (still) be allowed
+			includedFiles.remove(filePath);
+		} finally {
+			// neatly clean up after ourselves - esp. after exceptions
+			if (freshRun) {
+				INCLUDED_FILES.remove();
+			}
+		}
+	}
 
     protected void expandExpressions(ParsedNode parsedNode) {
         if (changeLogParameters == null) {
